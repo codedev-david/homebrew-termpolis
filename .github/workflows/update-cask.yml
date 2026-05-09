@@ -1,0 +1,83 @@
+name: Update Cask
+
+# Triggered by the main termpolis repo on each tag push.
+# The dispatching workflow passes { version } as the payload — we
+# fetch the matching .dmg sha256s from GitHub Releases and rewrite
+# Casks/termpolis.rb in-place. Manual dispatch is also supported for
+# emergency re-bumps.
+on:
+  repository_dispatch:
+    types: [termpolis-release]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Termpolis version to bump to (no leading v)"
+        required: true
+        type: string
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ -n "${{ github.event.client_payload.version }}" ]; then
+            echo "version=${{ github.event.client_payload.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch DMG SHA256s
+        id: sha
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          v="${{ steps.ver.outputs.version }}"
+          # GH CLI returns digests as `sha256:<hex>`; strip the prefix.
+          arm=$(gh release view "v$v" --repo codedev-david/termpolis --json assets \
+            -q ".assets[] | select(.name == \"Termpolis-$v-arm64.dmg\") | .digest" | sed 's/^sha256://')
+          intel=$(gh release view "v$v" --repo codedev-david/termpolis --json assets \
+            -q ".assets[] | select(.name == \"Termpolis-$v.dmg\") | .digest" | sed 's/^sha256://')
+          if [ -z "$arm" ] || [ -z "$intel" ]; then
+            echo "Missing DMG asset(s) for v$v — arm='$arm' intel='$intel'" >&2
+            exit 1
+          fi
+          echo "arm=$arm" >> "$GITHUB_OUTPUT"
+          echo "intel=$intel" >> "$GITHUB_OUTPUT"
+
+      - name: Rewrite Casks/termpolis.rb
+        run: |
+          v="${{ steps.ver.outputs.version }}"
+          arm="${{ steps.sha.outputs.arm }}"
+          intel="${{ steps.sha.outputs.intel }}"
+          python3 - <<PY
+          import re, pathlib
+          p = pathlib.Path("Casks/termpolis.rb")
+          s = p.read_text()
+          s = re.sub(r'version "[^"]+"', f'version "$v"', s, count=1)
+          # First sha256 is on_arm, second is on_intel.
+          parts = s.split('sha256 "')
+          if len(parts) >= 3:
+              parts[1] = f'$arm"' + parts[1].split('"', 1)[1]
+              parts[2] = f'$intel"' + parts[2].split('"', 1)[1]
+              s = 'sha256 "'.join(parts)
+          p.write_text(s)
+          PY
+
+      - name: Commit and push
+        run: |
+          v="${{ steps.ver.outputs.version }}"
+          if git diff --quiet Casks/termpolis.rb; then
+            echo "No changes — already at v$v"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/termpolis.rb
+          git commit -m "termpolis $v"
+          git push
