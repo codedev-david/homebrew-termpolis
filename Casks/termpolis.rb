@@ -5,8 +5,7 @@ cask "termpolis" do
   sha256 arm:   "102aab28253366b073c342e906494e3df81912337261c49867facaaf642e89cc",
          intel: "379b2ac1bcd4a8486cf9b5ecb00075aecb97cdcccf1566f1f8cedfd842f16043"
 
-  url "https://github.com/codedev-david/termpolis/releases/download/v#{version}/Termpolis-#{version}#{arch}.dmg",
-      verified: "github.com/codedev-david/termpolis/"
+  url "https://github.com/codedev-david/termpolis/releases/download/v#{version}/Termpolis-#{version}#{arch}.dmg"
   name "Termpolis"
   desc "Desktop terminal for Claude Code, Codex and Gemini CLI with shared memory"
   homepage "https://termpolis.com/"
