@@ -209,9 +209,9 @@ jobs:
             || echo "::warning::codesign --verify failed for $V"
           spctl --assess --type execute -vv "$app" \
             || echo "::warning::Gatekeeper assessment failed for $V"
-          # No `depends_on macos:` while the app's floor is at or below
-          # Homebrew's own (macOS 11); `brew audit --online` fails the run if a
-          # future Electron raises it past that.
+          # The cask says plain `depends_on :macos` while the app's floor is at
+          # or below Homebrew's own (macOS 11; Electron 30 needs 10.15).
+          # `brew audit --online` fails the run if a future Electron raises it.
           echo "LSMinimumSystemVersion=$(defaults read "$app/Contents/Info.plist" LSMinimumSystemVersion || true)"
           brew uninstall --cask --zap codedev-david/termpolis/termpolis
 

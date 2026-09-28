@@ -1,5 +1,5 @@
 cask "termpolis" do
-  arch arm: "-arm64", intel: ""
+  arch arm: "-arm64"
 
   version "1.11.55"
   sha256 arm:   "102aab28253366b073c342e906494e3df81912337261c49867facaaf642e89cc",
@@ -17,6 +17,7 @@ cask "termpolis" do
   end
 
   auto_updates true
+  depends_on :macos
 
   app "Termpolis.app"
 
