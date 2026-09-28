@@ -1,83 +1,219 @@
 name: Update Cask
 
-# Triggered by the main termpolis repo on each tag push.
-# The dispatching workflow passes { version } as the payload — we
-# fetch the matching .dmg sha256s from GitHub Releases and rewrite
-# Casks/termpolis.rb in-place. Manual dispatch is also supported for
-# emergency re-bumps.
+# Keeps Casks/termpolis.rb on the latest PUBLISHED Termpolis release, the way
+# the Chocolatey package is kept current — without anyone having to push.
+#
+# The tap POLLS rather than waiting to be told. The old design had the termpolis
+# release workflow fire a repository_dispatch here, but GITHUB_TOKEN can't
+# dispatch into another repository, and the cross-repo token it needed was never
+# created — so that job "succeeded" by skipping on every release while this cask
+# sat at 1.11.55 for 37 minor versions. Polling needs no secret at all.
+#
+# `releases/latest` never returns a draft or a prerelease, which is what makes
+# polling safe: termpolis releases are drafted first and only flipped public
+# once every platform's assets have validated, so the cask can never point at a
+# DMG that 404s.
 on:
-  repository_dispatch:
-    types: [termpolis-release]
+  schedule:
+    - cron: "17,47 * * * *"
   workflow_dispatch:
     inputs:
       version:
-        description: "Termpolis version to bump to (no leading v)"
-        required: true
+        description: "Pin a version (no leading v). Empty = latest published release. A pinned older version is replaced again by the next scheduled run."
+        required: false
         type: string
 
+concurrency:
+  group: update-cask
+  cancel-in-progress: false
+
 jobs:
-  update:
+  check:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
+      actions: write # the keepalive step below
+    outputs:
+      changed: ${{ steps.resolve.outputs.changed }}
+      version: ${{ steps.resolve.outputs.version }}
+      arm: ${{ steps.resolve.outputs.arm }}
+      intel: ${{ steps.resolve.outputs.intel }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve version
-        id: ver
-        run: |
-          if [ -n "${{ github.event.client_payload.version }}" ]; then
-            echo "version=${{ github.event.client_payload.version }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Fetch DMG SHA256s
-        id: sha
+      - name: Resolve target release
+        id: resolve
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          PINNED: ${{ inputs.version }}
         run: |
-          v="${{ steps.ver.outputs.version }}"
-          # GH CLI returns digests as `sha256:<hex>`; strip the prefix.
-          arm=$(gh release view "v$v" --repo codedev-david/termpolis --json assets \
-            -q ".assets[] | select(.name == \"Termpolis-$v-arm64.dmg\") | .digest" | sed 's/^sha256://')
-          intel=$(gh release view "v$v" --repo codedev-david/termpolis --json assets \
-            -q ".assets[] | select(.name == \"Termpolis-$v.dmg\") | .digest" | sed 's/^sha256://')
-          if [ -z "$arm" ] || [ -z "$intel" ]; then
-            echo "Missing DMG asset(s) for v$v — arm='$arm' intel='$intel'" >&2
+          set -euo pipefail
+          cask=Casks/termpolis.rb
+          cur_v=$(sed -nE 's/^  version "([^"]+)"$/\1/p' "$cask")
+          cur_arm=$(grep -oE 'arm: +"[0-9a-f]{64}"' "$cask" | grep -oE '[0-9a-f]{64}' || true)
+          cur_intel=$(grep -oE 'intel: +"[0-9a-f]{64}"' "$cask" | grep -oE '[0-9a-f]{64}' || true)
+
+          if [ -n "$PINNED" ]; then
+            tag="v${PINNED#v}"
+          else
+            tag=$(gh api repos/codedev-david/termpolis/releases/latest --jq .tag_name)
+          fi
+          v="${tag#v}"
+          # The version is interpolated into Ruby and a commit message; accept
+          # nothing but a plain x.y.z.
+          if ! printf '%s' "$v" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::refusing unexpected release tag '$tag'"
             exit 1
           fi
-          echo "arm=$arm" >> "$GITHUB_OUTPUT"
-          echo "intel=$intel" >> "$GITHUB_OUTPUT"
+          gh api "repos/codedev-david/termpolis/releases/tags/$tag" > release.json
+
+          # GitHub records a sha256 for every asset it stores, so the published
+          # DMG is never downloaded here. DMGs are stapled BEFORE upload, which
+          # makes that digest the hash of the exact bytes `brew` will fetch.
+          # Older assets predate the digest field; those get hashed directly.
+          sha_of() {
+            local d url
+            d=$(jq -r --arg n "$1" '.assets[] | select(.name == $n) | .digest // empty' release.json)
+            case "$d" in
+              sha256:*) printf '%s\n' "${d#sha256:}"; return ;;
+            esac
+            url=$(jq -r --arg n "$1" '.assets[] | select(.name == $n) | .browser_download_url // empty' release.json)
+            [ -n "$url" ] || return 0
+            curl -fsSL --retry 3 "$url" | sha256sum | cut -d' ' -f1
+          }
+          arm=$(sha_of "Termpolis-$v-arm64.dmg")
+          intel=$(sha_of "Termpolis-$v.dmg")
+          for h in "$arm" "$intel"; do
+            if ! printf '%s' "$h" | grep -qE '^[0-9a-f]{64}$'; then
+              echo "::error::$tag is missing a macOS DMG (arm='$arm' intel='$intel')"
+              exit 1
+            fi
+          done
+
+          changed=false
+          if [ "$v" != "$cur_v" ] || [ "$arm" != "$cur_arm" ] || [ "$intel" != "$cur_intel" ]; then
+            changed=true
+          fi
+          # `releases/latest` follows whichever release was published last, so a
+          # patch for an older line would otherwise walk the cask backwards.
+          newest=$(printf '%s\n%s\n' "$cur_v" "$v" | sort -V | tail -n1)
+          if [ -z "$PINNED" ] && [ "$v" != "$cur_v" ] && [ "$newest" != "$v" ]; then
+            echo "::warning::latest release $v is older than the cask's $cur_v; not downgrading"
+            changed=false
+          fi
+
+          echo "cask $cur_v -> release $v (changed=$changed)"
+          {
+            echo "changed=$changed"
+            echo "version=$v"
+            echo "arm=$arm"
+            echo "intel=$intel"
+          } >> "$GITHUB_OUTPUT"
+
+      # GitHub disables a public repo's scheduled workflows after 60 days
+      # without repository activity, and this repo only changes when Termpolis
+      # ships. Re-enabling resets that clock, so a quiet stretch between
+      # releases can't silently switch the poller off.
+      - name: Keep the schedule alive
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/update-cask.yml/enable" \
+            || echo "::warning::could not refresh this workflow's enabled state"
+
+  update:
+    needs: check
+    if: needs.check.outputs.changed == 'true'
+    # Validated on a real Mac: the new cask is style-checked, audited, both
+    # DMGs are fetched through brew (which verifies each sha256), and the app is
+    # installed and uninstalled. Nothing is pushed unless all of that passes.
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    env:
+      V: ${{ needs.check.outputs.version }}
+      ARM: ${{ needs.check.outputs.arm }}
+      INTEL: ${{ needs.check.outputs.intel }}
+      PINNED: ${{ inputs.version }}
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_ANALYTICS: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # `brew tap` clones this checkout
 
       - name: Rewrite Casks/termpolis.rb
         run: |
-          v="${{ steps.ver.outputs.version }}"
-          arm="${{ steps.sha.outputs.arm }}"
-          intel="${{ steps.sha.outputs.intel }}"
-          python3 - <<PY
-          import re, pathlib
+          python3 - <<'PY'
+          import os, pathlib, re, sys
+
+          v, arm, intel = os.environ["V"], os.environ["ARM"], os.environ["INTEL"]
+          if not re.fullmatch(r"\d+\.\d+\.\d+", v):
+              sys.exit(f"bad version {v!r}")
+          for h in (arm, intel):
+              if not re.fullmatch(r"[0-9a-f]{64}", h):
+                  sys.exit(f"bad sha256 {h!r}")
+
           p = pathlib.Path("Casks/termpolis.rb")
           s = p.read_text()
-          s = re.sub(r'version "[^"]+"', f'version "$v"', s, count=1)
-          # First sha256 is on_arm, second is on_intel.
-          parts = s.split('sha256 "')
-          if len(parts) >= 3:
-              parts[1] = f'$arm"' + parts[1].split('"', 1)[1]
-              parts[2] = f'$intel"' + parts[2].split('"', 1)[1]
-              s = 'sha256 "'.join(parts)
+          for pat, new in (
+              (r'(?m)^(  version ")[^"]+(")$', v),
+              (r'(arm:\s+")[0-9a-f]{64}(")', arm),
+              (r'(intel:\s+")[0-9a-f]{64}(")', intel),
+          ):
+              s, n = re.subn(pat, lambda m: m.group(1) + new + m.group(2), s)
+              if n != 1:
+                  sys.exit(f"expected exactly one match for {pat}, found {n}")
           p.write_text(s)
           PY
+          git diff
 
-      - name: Commit and push
+      - name: Commit locally
         run: |
-          v="${{ steps.ver.outputs.version }}"
-          if git diff --quiet Casks/termpolis.rb; then
-            echo "No changes — already at v$v"
-            exit 0
-          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Casks/termpolis.rb
-          git commit -m "termpolis $v"
-          git push
+          git commit -am "termpolis $V"
+
+      - name: Tap the new commit
+        run: brew tap codedev-david/termpolis "$GITHUB_WORKSPACE"
+
+      - name: brew style
+        # The cask only: styling the whole tap would also actionlint this
+        # workflow, and a lint nit here must not hold Homebrew users back.
+        run: brew style --cask codedev-david/termpolis/termpolis
+
+      - name: brew audit
+        # --online also compares against livecheck, which a deliberately pinned
+        # older version fails by definition.
+        if: env.PINNED == ''
+        run: brew audit --cask --online codedev-david/termpolis/termpolis
+
+      - name: Fetch both DMGs through brew (verifies each sha256)
+        run: brew fetch --cask --arch=all codedev-david/termpolis/termpolis
+
+      - name: Install, check, uninstall
+        run: |
+          set -euo pipefail
+          brew install --cask codedev-david/termpolis/termpolis
+          app=/Applications/Termpolis.app
+          got=$(defaults read "$app/Contents/Info.plist" CFBundleShortVersionString)
+          if [ "$got" != "$V" ]; then
+            echo "::error::installed Termpolis.app reports $got, expected $V"
+            exit 1
+          fi
+          # Informational: a signing regression should be loud, but it is the
+          # release pipeline's gate, not this cask's.
+          codesign --verify --deep --strict "$app" \
+            || echo "::warning::codesign --verify failed for $V"
+          spctl --assess --type execute -vv "$app" \
+            || echo "::warning::Gatekeeper assessment failed for $V"
+          # No `depends_on macos:` while the app's floor is at or below
+          # Homebrew's own (macOS 11); `brew audit --online` fails the run if a
+          # future Electron raises it past that.
+          echo "LSMinimumSystemVersion=$(defaults read "$app/Contents/Info.plist" LSMinimumSystemVersion || true)"
+          brew uninstall --cask --zap codedev-david/termpolis/termpolis
+
+      - name: Push
+        run: git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"

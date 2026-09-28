@@ -1,6 +1,6 @@
 # Homebrew Tap for Termpolis
 
-Official Homebrew Cask tap for [Termpolis](https://termpolis.com/) — the **Secure AI-Assisted Development** terminal where Claude, Codex, Gemini, and Qwen work together as a team.
+Official Homebrew Cask tap for [Termpolis](https://termpolis.com/) — the desktop terminal where Claude Code, Codex and Gemini CLI share one persistent memory.
 
 ## Install
 
@@ -17,9 +17,11 @@ brew install --cask codedev-david/termpolis/termpolis
 
 ## Update
 
+Termpolis updates itself in place, so the cask is marked `auto_updates` and a plain `brew upgrade` leaves it alone. To have Homebrew reinstall it anyway:
+
 ```sh
 brew update
-brew upgrade --cask termpolis
+brew upgrade --cask --greedy termpolis
 ```
 
 ## Uninstall
@@ -47,7 +49,7 @@ Both `.dmg`s are notarized and code-signed with a Developer ID Application certi
 
 ## Versioning
 
-The version on this tap tracks the latest stable [Termpolis release](https://github.com/codedev-david/termpolis/releases). Each tag push to the main repo triggers an automated PR against this tap (see `.github/workflows/update-cask.yml`).
+The cask tracks the latest published [Termpolis release](https://github.com/codedev-david/termpolis/releases) automatically. `.github/workflows/update-cask.yml` checks for a new release every 30 minutes (drafts and prereleases are never picked up), rewrites the version and both sha256s, and only pushes after the new cask passes `brew style`, `brew audit --online`, a checksum-verified fetch of both DMGs, and a real install and uninstall on a macOS runner. To bump immediately: `gh workflow run update-cask.yml -R codedev-david/homebrew-termpolis`.
 
 ## Issues
 
