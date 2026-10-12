@@ -1,9 +1,9 @@
 cask "termpolis" do
   arch arm: "-arm64"
 
-  version "1.51.2"
-  sha256 arm:   "44085e14d771e8d725e0adc61d5cd4aaaab38928b2774a86cd4e496a5e0963a3",
-         intel: "115373f133995977512726b2fdba411754ce0fa8d8fc9dbdc376e8eb934410de"
+  version "1.51.3"
+  sha256 arm:   "680e22f0c8cfbf48528abb792d29c0d4008698572802781b8489d126cba5d4ae",
+         intel: "d9b8a50f65649a70611e628ace4afa6a43828d8e800d1205d7c824c537e9a413"
 
   url "https://github.com/codedev-david/termpolis/releases/download/v#{version}/Termpolis-#{version}#{arch}.dmg"
   name "Termpolis"
