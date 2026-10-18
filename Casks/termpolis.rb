@@ -16,7 +16,7 @@ cask "termpolis" do
   end
 
   auto_updates true
-  depends_on :macos
+  depends_on macos: ">= :monterey"
 
   app "Termpolis.app"
 
