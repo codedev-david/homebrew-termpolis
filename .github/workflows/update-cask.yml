@@ -180,7 +180,16 @@ jobs:
           git commit -am "termpolis $V"
 
       - name: Tap the new commit
-        run: brew tap codedev-david/termpolis "$GITHUB_WORKSPACE"
+        # Homebrew now refuses to load a cask from a third-party tap until the
+        # tap is trusted (brew trust). Without this every audit fails with
+        # "Refusing to load cask ... from untrusted tap", which held the cask at
+        # 1.54.4 from 2026-11-07. `brew trust` only exists on new Homebrew, so an
+        # older brew that has no such command (and no such check) goes on.
+        run: |
+          brew tap codedev-david/termpolis "$GITHUB_WORKSPACE"
+          if brew commands --quiet | grep -qx trust; then
+            brew trust codedev-david/termpolis
+          fi
 
       - name: brew style
         # The cask only: styling the whole tap would also actionlint this
